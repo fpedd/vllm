@@ -26,7 +26,9 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
+    deep_gemm_disabled_for_model,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
     resolve_fp8_moe_weight_block_shape,
@@ -521,6 +523,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             activation_key=activation_key,
             allow_vllm_cutlass=False,
         )
+        self.disable_ue8m0_activations = (
+            deep_gemm_disabled_for_model()
+            and self.fp8_backend
+            not in (Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.BATCHED_DEEPGEMM)
+        )
 
     def create_weights(
         self,
@@ -779,6 +786,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             gemm1_beta=getattr(layer, "swiglu_beta", None),
             layer=layer,
         )
+
+        if quant_config is not None and self.disable_ue8m0_activations:
+            quant_config.use_ue8m0 = False
 
         # Inject biases into the quant config if the model has them
         # (e.g. GPT-OSS biased MoE)
