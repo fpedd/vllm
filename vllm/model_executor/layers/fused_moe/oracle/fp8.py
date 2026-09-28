@@ -9,6 +9,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config_or_none
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -38,6 +39,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
 )
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import should_auto_disable_deep_gemm
 from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
@@ -388,6 +390,14 @@ def resolve_fp8_moe_weight_block_shape(
     )
 
 
+def deep_gemm_disabled_for_model() -> bool:
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None or vllm_config.model_config is None:
+        return False
+    hf_text_config = vllm_config.model_config.hf_text_config
+    return should_auto_disable_deep_gemm(getattr(hf_text_config, "model_type", None))
+
+
 def select_fp8_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
@@ -473,8 +483,12 @@ def select_fp8_moe_backend(
             requested_backend, config, weight_key, activation_key, activation_format
         )
 
-    # Handle explicit DeepGEMM FP8 configuration.
-    if envs.is_set("VLLM_USE_DEEP_GEMM") or envs.is_set("VLLM_MOE_USE_DEEP_GEMM"):
+    # Handle explicit DeepGEMM FP8 configuration, which cannot re-enable
+    # DeepGEMM for models whose accuracy degrades with its E8M0 scales.
+    if deep_gemm_disabled_for_model():
+        AVAILABLE_BACKENDS.remove(Fp8MoeBackend.DEEPGEMM)
+        AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_DEEPGEMM)
+    elif envs.is_set("VLLM_USE_DEEP_GEMM") or envs.is_set("VLLM_MOE_USE_DEEP_GEMM"):
         if not envs.VLLM_USE_DEEP_GEMM or not envs.VLLM_MOE_USE_DEEP_GEMM:
             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.DEEPGEMM)
             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_DEEPGEMM)
